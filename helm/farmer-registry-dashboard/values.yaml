@@ -7,7 +7,7 @@
 # realm from IAM itself.
 
 image:
-  repository: ""   # e.g. <account>.dkr.ecr.ap-south-1.amazonaws.com/eoan/farmer-registry/dashboard-ui-<RP version>
+  repository: ""   # e.g. <account>.dkr.ecr.ap-south-1.amazonaws.com/eoan/oan_farmerregistry_dashboard/dashboard-ui-<RP version>
   tag: ""          # set by CI: <commit sha (12)>@sha256:<immutable digest>
   pullPolicy: IfNotPresent
 

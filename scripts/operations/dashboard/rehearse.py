@@ -22,7 +22,7 @@ def expect(result,success,stage):
 
 
 def rehearse(image,tools,chart,values):
-    # eoan/farmer-registry/dashboard-ui-<RP version>:<build tag>, or openg2p/farmer-registry/dashboard-ui:<commit12> before.
+    # eoan/oan_farmerregistry_dashboard/dashboard-ui-<RP version>:<build tag>, or openg2p/farmer-registry/dashboard-ui:<commit12> before.
     if not image_names.is_pinned_image(image,'dashboard-ui'):
         raise ValueError('Pinned Farmer dashboard image required')
     release='farmer-registry-dashboard'

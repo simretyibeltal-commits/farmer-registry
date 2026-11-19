@@ -1,6 +1,7 @@
 """The ECR names of the Farmer Registry images: eoan/farmer-registry/<image>-<RP version>:<version>-<branch>.<build>.
 
     eoan/farmer-registry/staff-ui-1.2.2-rc.625:0.0.0-develop.300
+    eoan/oan_farmerregistry_dashboard/dashboard-ui-1.2.2-rc.625:0.0.0-develop.300   (a dashboard, under its own repository)
 
 The RP version is appVersion of helm/openg2p-farmer-registry/Chart.yaml (the OpenG2P registry platform the images are
 built on) and <version> is that chart's version, so both move with Chart.yaml and nothing else holds them. <build> is the
@@ -21,6 +22,9 @@ from pathlib import Path
 
 CHART = Path(__file__).resolve().parents[2] / "helm/openg2p-farmer-registry/Chart.yaml"
 PATH = "eoan/farmer-registry"
+# The dashboards are built from their own GitHub repositories and are named under those, like every eoan image:
+# eoan/<repository>/<image>-<RP version>.
+PATHS = {"dashboard-api": "eoan/farmer-registry-dashboard-api", "dashboard-ui": "eoan/oan_farmerregistry_dashboard"}
 LEGACY_PATH = "openg2p/farmer-registry"
 TAG = re.compile(r"\d+\.\d+\.\d+-[a-z0-9]+(?:-[a-z0-9]+)*\.[1-9]\d*")
 IMAGE = re.compile(r"\d{12}\.dkr\.ecr\.ap-south-1\.amazonaws\.com/(?P<repository>[^:@\s]+)"
@@ -43,7 +47,7 @@ def chart_version():
 
 
 def repository(image):
-    return "%s/%s-%s" % (PATH, image, platform_version())
+    return "%s/%s-%s" % (PATHS.get(image, PATH), image, platform_version())
 
 
 def legacy_repository(image):
@@ -53,7 +57,7 @@ def legacy_repository(image):
 def is_repository(value, image):
     """True for a repository of `image` under any platform version, or its name before eoan: what a release may run."""
     return (value == legacy_repository(image)
-            or re.fullmatch(r"%s/%s-\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?" % (re.escape(PATH), re.escape(image)), value) is not None)
+            or re.fullmatch(r"%s/%s-\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?" % (re.escape(PATHS.get(image, PATH)), re.escape(image)), value) is not None)
 
 
 def is_pinned_image(image, component, commit=None):

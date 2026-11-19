@@ -171,7 +171,7 @@ def test_a_failed_deploy_never_reaches_chart_publication():
 
 
 package_chart = module("package_chart", "ci/deploy/package_chart.py")
-DEPLOYED_UI = {"outcome": "deployed", "repository": ECR + "/eoan/farmer-registry/dashboard-ui-1.2.2-rc.625",
+DEPLOYED_UI = {"outcome": "deployed", "repository": ECR + "/eoan/oan_farmerregistry_dashboard/dashboard-ui-1.2.2-rc.625",
                "tag": "0.0.0-develop.900", "digest": "sha256:" + "c" * 64}
 
 
