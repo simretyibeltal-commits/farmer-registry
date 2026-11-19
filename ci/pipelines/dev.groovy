@@ -253,6 +253,8 @@ pipeline {
                         }
                     }
                     archiveArtifacts artifacts: 'service-outcomes/*.json,service-outcomes/*.tsv', allowEmptyArchive: true
+                    // "Publish chart" publishes the dashboard UI chart only when this says it was deployed.
+                    stash name: 'service-outcomes', includes: 'service-outcomes/deploy.json', allowEmpty: true
                 }
             }
         }
@@ -269,8 +271,12 @@ pipeline {
             options { timeout(time: 15, unit: 'MINUTES') }
             steps {
                 checkout scm
-                sh 'rm -rf built-chart'
+                sh 'rm -rf built-chart service-outcomes'
                 unstash 'built-chart'
+                script {
+                    // Absent when the services stages did not run: then only the registry chart is published.
+                    try { unstash 'service-outcomes' } catch (ignored) { echo 'No service outcomes: the dashboard chart is not published.' }
+                }
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     // A maintainer's token for now; the GitHub App replaces this credential when it is configured.
                     withCredentials([usernamePassword(credentialsId: "${OAN_HELM_FORK_CRED_ID}", usernameVariable: 'GH_USER', passwordVariable: 'GH_TOKEN')]) {

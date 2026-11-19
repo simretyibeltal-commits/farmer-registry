@@ -7,6 +7,10 @@ Two stages of every develop build run this script:
 
 The deploy installs built-chart/ (BUILT_CHART_DIR in deploy-rc.sh), so New Dev runs exactly the archive that is published.
 
+publish also publishes the dashboard UI chart (helm/farmer-registry-dashboard) when "Deploy (services)" deployed this
+build's dashboard UI (service-outcomes/deploy.json): packaged with the image it deployed, at the registry chart's version,
+so oan-helm lists the dashboard New Dev runs. A dashboard that was not deployed is not published.
+
 The chart version comes from git (OpenG2P's policy, in scripts/ci/derive-version.sh of oan-helm), so the chart and images
 of a commit always belong together and nothing is committed back. The image tags and digests are written into the
 packaged copy only. oan-helm's publisher (scripts/ci/publish_chart.py) adds the archive and its workflow updates the
@@ -33,6 +37,8 @@ sys.path.insert(0, str(HERE))
 import release_images  # noqa: E402
 
 CHART = "openg2p-farmer-registry"
+DASHBOARD = "farmer-registry-dashboard"
+SERVICE_OUTCOMES = ROOT / "service-outcomes/deploy.json"
 OAN_HELM = "https://github.com/Centre-for-Open-Societal-Systems/oan-helm.git"
 ALREADY_PUBLISHED = 4
 OUTPUT = ROOT / "built-chart"
@@ -115,6 +121,36 @@ def package_build(env, work):
     return 0
 
 
+def deployed_dashboard():
+    """The outcome record of the dashboard UI when "Deploy (services)" deployed it in this build, else None."""
+    if not SERVICE_OUTCOMES.is_file():
+        return None
+    record = json.loads(SERVICE_OUTCOMES.read_text(encoding="utf-8")).get("components", {}).get(DASHBOARD, {})
+    return record if record.get("outcome") == "deployed" else None
+
+
+def package_dashboard(record, version, scripts, work, env):
+    """helm/farmer-registry-dashboard with the image New Dev runs, into built-chart/dashboard/ (oan-helm's packager)."""
+    images = work / "dashboard-images.tsv"
+    images.write_text("image\t%s\t%s@%s\n" % (record["repository"], record["tag"], record["digest"]), encoding="utf-8")
+    # The packager adds its annotations under annotations:, which this chart has none of. A copy gets an empty block:
+    # the chart itself stays as deployed (its hash is what the coordinator's hook rehearsal is bound to).
+    chart = work / "dashboard" / DASHBOARD
+    shutil.copytree(str(ROOT / "helm" / DASHBOARD), str(chart))
+    metadata = chart / "Chart.yaml"
+    text = metadata.read_text(encoding="utf-8")
+    if "\nannotations:\n" not in "\n" + text:
+        metadata.write_text(text.rstrip("\n") + "\nannotations:\n", encoding="utf-8")
+    output = OUTPUT / "dashboard"
+    run([sys.executable, str(scripts / "package_chart.py"), "--chart", str(chart), "--images", str(images),
+         "--output", str(output), "--source-repository", "Centre-for-Open-Societal-Systems/farmer-registry",
+         "--source-commit", run(["git", "rev-parse", "HEAD"]).strip(),
+         "--subject", run(["git", "log", "-1", "--pretty=%s"]).strip(),
+         "--release", DASHBOARD, "--namespace", "farmer",
+         "--overlay", "helm/environments/dev/services/%s.yaml" % DASHBOARD, "--version", version], env=env)
+    return output / ("%s-%s.tgz" % (DASHBOARD, version))
+
+
 def publish_build(env, work):
     if env.get("DRY_RUN") != "1" and not env.get("GH_TOKEN"):
         print("FAIL: no GitHub credential: the chart was not published.")
@@ -123,11 +159,17 @@ def publish_build(env, work):
     if len(archives) != 1:
         raise ValueError("expected the one archive of this build in %s" % OUTPUT)
     scripts = fetch_publisher(work)
-    result = subprocess.run([sys.executable, str(scripts / "publish_chart.py"), str(archives[0])], env=env)
-    if result.returncode == ALREADY_PUBLISHED:
-        print("%s was published by an earlier run of this commit." % archives[0].name)
-        return 0
-    return result.returncode
+    dashboard = deployed_dashboard()
+    if dashboard is not None:
+        version = archives[0].name[len(CHART) + 1:-len(".tgz")]
+        archives.append(package_dashboard(dashboard, version, scripts, work, env))
+    for archive in archives:
+        result = subprocess.run([sys.executable, str(scripts / "publish_chart.py"), str(archive)], env=env)
+        if result.returncode == ALREADY_PUBLISHED:
+            print("%s was published by an earlier run of this commit." % archive.name)
+        elif result.returncode != 0:
+            return result.returncode
+    return 0
 
 
 def main(argv=None, env=None):

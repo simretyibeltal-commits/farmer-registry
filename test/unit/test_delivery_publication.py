@@ -168,3 +168,59 @@ def test_a_failed_deploy_never_reaches_chart_publication():
     pipeline = (ROOT / "ci/pipelines/dev.groovy").read_text()
     deploy = pipeline.split("stage('Deploy (registry)')", 1)[1].split("stage('Build (services)')", 1)[0]
     assert "catchError" not in deploy
+
+
+package_chart = module("package_chart", "ci/deploy/package_chart.py")
+DEPLOYED_UI = {"outcome": "deployed", "repository": ECR + "/eoan/farmer-registry/dashboard-ui-1.2.2-rc.625",
+               "tag": "0.0.0-develop.900", "digest": "sha256:" + "c" * 64}
+
+
+@pytest.fixture
+def publish_run(tmp_path, monkeypatch):
+    """publish_build with the oan-helm scripts and the packager faked: what it packages and what it publishes."""
+    output, outcomes = tmp_path / "built-chart", tmp_path / "service-outcomes/deploy.json"
+    output.mkdir()
+    (output / "openg2p-farmer-registry-0.0.0-develop.900.tgz").write_text("")
+    monkeypatch.setattr(package_chart, "OUTPUT", output)
+    monkeypatch.setattr(package_chart, "SERVICE_OUTCOMES", outcomes)
+    monkeypatch.setattr(package_chart, "fetch_publisher", lambda work: tmp_path / "scripts")
+    packaged, published = [], []
+
+    def package_dashboard(record, version, scripts, work, env):
+        packaged.append((record["repository"], record["tag"], record["digest"], version))
+        return output / "dashboard" / ("farmer-registry-dashboard-%s.tgz" % version)
+
+    class Done:
+        returncode = 0
+
+    monkeypatch.setattr(package_chart, "package_dashboard", package_dashboard)
+    monkeypatch.setattr(package_chart.subprocess, "run", lambda command, env: published.append(Path(command[2]).name) or Done)
+
+    def run(components=None):
+        if components is not None:
+            outcomes.parent.mkdir(exist_ok=True)
+            outcomes.write_text(json.dumps({"environment": "dev", "components": components}))
+        assert package_chart.publish_build({"DRY_RUN": "1"}, tmp_path) == 0
+        return packaged, published
+    return run
+
+
+def test_the_deployed_dashboard_ui_is_published_beside_the_registry_chart(publish_run):
+    packaged, published = publish_run({"farmer-registry-dashboard": DEPLOYED_UI})
+    assert packaged == [(DEPLOYED_UI["repository"], "0.0.0-develop.900", DEPLOYED_UI["digest"], "0.0.0-develop.900")]
+    assert published == ["openg2p-farmer-registry-0.0.0-develop.900.tgz", "farmer-registry-dashboard-0.0.0-develop.900.tgz"]
+
+
+@pytest.mark.parametrize("components", [None, {}, {"farmer-registry-dashboard": dict(DEPLOYED_UI, outcome="built")},
+                                        {"farmer-registry-dashboard": dict(DEPLOYED_UI, outcome="skipped")}])
+def test_a_dashboard_ui_that_was_not_deployed_is_not_published(publish_run, components):
+    packaged, published = publish_run(components)
+    assert packaged == [] and published == ["openg2p-farmer-registry-0.0.0-develop.900.tgz"]
+
+
+def test_publish_chart_reads_the_outcomes_of_deploy_services():
+    pipeline = (ROOT / "ci/pipelines/dev.groovy").read_text()
+    services = pipeline.split("stage('Deploy (services)')", 1)[1].split("stage('Publish chart')", 1)[0]
+    assert "stash name: 'service-outcomes', includes: 'service-outcomes/deploy.json', allowEmpty: true" in services
+    publish = pipeline.split("stage('Publish chart')", 1)[1].split("    post {", 1)[0]
+    assert "try { unstash 'service-outcomes' }" in publish
