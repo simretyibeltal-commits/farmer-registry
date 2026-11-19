@@ -9,7 +9,7 @@ import tarfile
 import pytest
 import yaml
 
-from test_service_coordination import coordinator, ECR, SHA, DIGEST
+from test_service_coordination import coordinator, ECR, SHA, DIGEST, BUILD_TAG
 import central_chart
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -49,10 +49,12 @@ def test_dev_build_layout_does_not_read_legacy_chart(tmp_path, monkeypatch, kind
 
 
 def test_dev_api_build_records_central_archive_and_renderer_without_local_chart(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRANCH_NAME", "develop")
+    monkeypatch.setenv("BUILD_NUMBER", "300")
     component = next(c for c in coordinator.configuration() if c.get("kind") == "registry-dashboard-api")
     (tmp_path / "Dockerfile").write_text("FROM scratch\n")
     monkeypatch.setattr(coordinator, "checkout", lambda *a, **k: SHA)
-    monkeypatch.setattr(coordinator, "build_image", lambda *a, **k: {"repository": ECR + "/" + component["imageRepository"], "tag": SHA[:12], "digest": DIGEST})
+    monkeypatch.setattr(coordinator, "build_image", lambda *a, **k: {"repository": ECR + "/" + coordinator.image_repository(component, ""), "tag": SHA[:12], "digest": DIGEST})
     result = coordinator.build(component, "dev", tmp_path, ECR, lambda args: "")
     assert result["deploymentChart"] == coordinator.dashboard_chart_provenance()
     assert result["chartHash"] == coordinator.provenance_hash(result["deploymentChart"])
@@ -81,6 +83,8 @@ def test_corrupt_download_stops_before_any_build_or_hook(tmp_path, monkeypatch):
 
 
 def test_verified_ui_archive_is_given_to_existing_hook_rehearsal(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRANCH_NAME", "develop")
+    monkeypatch.setenv("BUILD_NUMBER", "300")
     component = next(c for c in coordinator.configuration() if c.get("chartSource") == "registry")
     content = package()
     pin = dict(central_chart.profile(), sha256=hashlib.sha256(content).hexdigest())
@@ -88,7 +92,7 @@ def test_verified_ui_archive_is_given_to_existing_hook_rehearsal(tmp_path, monke
     monkeypatch.setattr(central_chart.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(content))
     (tmp_path / "Dockerfile").write_text("FROM scratch\n")
     monkeypatch.setattr(coordinator, "checkout", lambda *a, **k: SHA)
-    monkeypatch.setattr(coordinator, "build_image", lambda *a, **k: {"repository": ECR + "/" + component["imageRepository"], "tag": SHA[:12], "digest": DIGEST})
+    monkeypatch.setattr(coordinator, "build_image", lambda *a, **k: {"repository": ECR + "/" + coordinator.image_repository(component, ""), "tag": SHA[:12], "digest": DIGEST})
     def rehearsal(component, environment, record, chart, registry, run):
         assert chart.suffix == ".tgz" and central_chart.verify(chart) == pin
         assert record["chartHash"] == coordinator.provenance_hash(pin)
@@ -102,7 +106,7 @@ def test_verified_ui_archive_is_given_to_existing_hook_rehearsal(tmp_path, monke
 def test_ui_provenance_change_rejected_before_checkout_or_helm(tmp_path):
     component = next(c for c in coordinator.configuration() if c.get("chartSource") == "registry")
     pin = dict(central_chart.profile(), sha256="0" * 64)
-    record = {"commit": SHA, "repository": ECR + "/" + component["imageRepository"], "tag": SHA[:12], "digest": DIGEST, "chartHash": "c" * 64, "deploymentChart": pin}
+    record = {"commit": SHA, "repository": ECR + "/" + coordinator.image_repository(component, ""), "tag": BUILD_TAG, "digest": DIGEST, "chartHash": "c" * 64, "deploymentChart": pin}
     with pytest.raises(coordinator.ServiceError, match="ui-approved-chart-provenance"):
         coordinator.deploy(component, "dev", record, tmp_path, ECR, lambda *a: pytest.fail("Unexpected tool call"))
 
@@ -138,7 +142,7 @@ def test_ui_central_deploy_retains_hook_image_resource_and_revision_guards(tmp_p
     values_path = tmp_path / "helm/environments/dev/services/farmer-registry-dashboard.yaml"
     values_path.parent.mkdir(parents=True)
     values_path.write_text(yaml.safe_dump({"_coordination": {"namespace": "farmer"}}))
-    record = {"commit": SHA, "repository": ECR + "/" + component["imageRepository"], "tag": SHA[:12], "digest": DIGEST,
+    record = {"commit": SHA, "repository": ECR + "/" + coordinator.image_repository(component, ""), "tag": BUILD_TAG, "digest": DIGEST,
               "chartHash": coordinator.provenance_hash(pin), "deploymentChart": pin}
     record["hookRehearsal"] = {"commit": SHA, "digest": DIGEST, "chartHash": record["chartHash"], "environment": "dev",
         "valuesHash": hashlib.sha256(json.dumps({}, sort_keys=True).encode()).hexdigest(),

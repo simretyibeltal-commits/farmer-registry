@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Execute dashboard hooks against isolated HTTP/SQLite fixtures, never live services."""
-import argparse,json,re,shutil,subprocess,tempfile,time,uuid
+import argparse,json,re,shutil,subprocess,sys,tempfile,time,uuid
 from pathlib import Path
 import yaml
 
 HERE=Path(__file__).resolve().parent
+sys.path.insert(0,str(HERE.parents[2]/'ci/deploy'))
+import image_names
 BASE='http://127.0.0.1:9137'
 
 
@@ -20,7 +22,8 @@ def expect(result,success,stage):
 
 
 def rehearse(image,tools,chart,values):
-    if not re.fullmatch(r'\d{12}\.dkr\.ecr\.ap-south-1\.amazonaws\.com/openg2p/farmer-registry/dashboard-ui:[a-f0-9]{12}@sha256:[a-f0-9]{64}',image):
+    # eoan/farmer-registry/dashboard-ui-<RP version>:<build tag>, or openg2p/farmer-registry/dashboard-ui:<commit12> before.
+    if not image_names.is_pinned_image(image,'dashboard-ui'):
         raise ValueError('Pinned Farmer dashboard image required')
     release='farmer-registry-dashboard'
     repository,tag=image.split('@',1)[0].rsplit(':',1)

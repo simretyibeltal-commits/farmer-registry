@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT / "ci/services"))
 sys.path.insert(0, str(ROOT / "ci"))
 from environments import connector_settings, namespace as environment_namespace, validate_cluster
 sys.path.insert(0, str(ROOT / "ci/deploy"))
+import image_names
 sys.path.insert(0, str(ROOT / "scripts/operations/connector"))
 MANIFEST = ROOT / "ci/services/catalogue.yaml"
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -118,13 +119,15 @@ def configuration(path=MANIFEST, environment="dev"):
             "name": "farmer-registry-dashboard-api", "release": "farmer-registry",
             "repository": "https://github.com/Centre-for-Open-Societal-Systems/farmer-registry-dashboard-api.git",
             "chart": "helm/openg2p-farmer-registry", "imageValues": "dashboardApi.image",
-            "imageRepository": "openg2p/farmer-registry/dashboard-api",
+            "image": "dashboard-api",
         }.items()):
             raise ValueError("Dashboard API must retain its Farmer chart ownership")
         if item["release"] in ("commons", "commons-services", "farmer-connector") or (item["release"] == "farmer-registry" and not embedded):
             raise ValueError("Optional service must not adopt an existing shared/Registry/old connector release")
         if item.get("imageRepository") and not re.fullmatch(r"openg2p/[a-z0-9/-]+", item["imageRepository"]):
             raise ValueError("Invalid image repository")
+        if item.get("image") is not None and not NAME.fullmatch(item["image"]):
+            raise ValueError("Invalid image name")
     if environment == "staging":
         items = copy.deepcopy(items)
         for item in items:
@@ -326,7 +329,9 @@ def prepare_dashboard_chart(state, values, before, installed_chart):
 
 def dashboard_hook_rehearsal(component, environment, record, chart, registry, run):
     tools = os.environ.get("COORDINATOR_IMAGE", "")
-    if not re.fullmatch(r"oan-ci/services:[a-f0-9]{12}", tools):
+    # run-container.sh tags it with IMAGE_TAG: image_names.py's on develop, the commit on staging.
+    name, _, tag = tools.partition(":")
+    if name != "oan-ci/services" or not (re.fullmatch(r"[a-f0-9]{12}", tag) or image_names.is_tag(tag)):
         raise ServiceError("dashboard-hook-rehearsal-tools-required")
     values_file = ROOT / "helm/environments" / environment / "services" / (component["name"] + ".yaml")
     overrides = yaml.safe_load(values_file.read_text(encoding="utf-8")) or {}
@@ -350,13 +355,22 @@ def dashboard_hook_rehearsal(component, environment, record, chart, registry, ru
 
 
 def image_repository(component, suffix):
+    # A component with an image name is named like the registry images: eoan/farmer-registry/<image>-<RP version>.
+    if component.get("image"):
+        return image_names.repository(component["image"])
     return component.get("imageRepository", "openg2p/farmer-registry/" + component["name"] + suffix)
 
 
 def ensure_image_repository(name, template, run):
-    """Create ECR repository `name` with the tag mutability, scan-on-push and encryption of `template`."""
-    settings = json.loads(run(["aws", "ecr", "describe-repositories", "--region", "ap-south-1",
-                               "--repository-names", template, "--output", "json"]))["repositories"][0]
+    """Create ECR repository `name` with the tag mutability, scan-on-push and encryption of `template`.
+
+    With no template: mutable tags, scan-on-push and AES256, as the pipeline makes the registry images' repositories.
+    """
+    if template is None:
+        settings = {"imageScanningConfiguration": {"scanOnPush": True}}
+    else:
+        settings = json.loads(run(["aws", "ecr", "describe-repositories", "--region", "ap-south-1",
+                                   "--repository-names", template, "--output", "json"]))["repositories"][0]
     encryption = settings.get("encryptionConfiguration") or {"encryptionType": "AES256"}
     args = ["aws", "ecr", "create-repository", "--region", "ap-south-1", "--repository-name", name,
             "--image-tag-mutability", settings.get("imageTagMutability", "MUTABLE"),
@@ -399,10 +413,12 @@ def build_image(component, role, spec, commit, source, registry, run, tag=None):
     try:
         pushed = run(["docker", "push", image])
     except ServiceError as error:
-        if str(error) != "image-repository-missing" or not suffix:
+        if str(error) != "image-repository-missing" or not (suffix or component.get("image")):
             raise
         # A role image (-api, -ui) whose repository was never made: create it like the component's own one, push again.
-        ensure_image_repository(image_repository(component, suffix), image_repository(component, ""), run)
+        # A named image's is new with each platform version: it is made like the registry images' ones.
+        template = None if component.get("image") else image_repository(component, "")
+        ensure_image_repository(image_repository(component, suffix), template, run)
         pushed = run(["docker", "push", image])
     matches = re.findall(r"digest: (sha256:[0-9a-f]{64})\b", pushed)
     if len(set(matches)) != 1:
@@ -444,6 +460,12 @@ def _build_resolved(component, environment, source, registry, commit, run):
             overlays = {role: chart_hash(relative_file(ROOT, spec["overlay"]))
                         for role, spec in image_specs(component).items() if spec.get("overlay")}
             tag = commit[:12]
+            if component.get("image"):
+                # The tag of the Jenkins build that builds it, like the registry images of that build.
+                try:
+                    tag = image_names.tag(os.environ.get("BRANCH_NAME", ""), os.environ.get("BUILD_NUMBER", ""))
+                except ValueError:
+                    raise ServiceError("image-tag-unavailable") from None
             if overlays:
                 tag += "-" + hashlib.sha256(json.dumps(overlays, sort_keys=True).encode()).hexdigest()[:12]
             for role, spec in image_specs(component).items():
@@ -707,7 +729,9 @@ def artifact(component, record, registry):
     expected_tag = record["commit"][:12]
     if record.get("overlayHashes"):
         expected_tag += "-" + hashlib.sha256(json.dumps(record["overlayHashes"], sort_keys=True).encode()).hexdigest()[:12]
-    if record.get("tag") != expected_tag or not re.fullmatch(r"[0-9a-f]{64}", record.get("chartHash", "")):
+    # A named image carries the tag of the build that made it; its commit is the record's and the image's revision label.
+    tagged = image_names.is_tag(record.get("tag", "")) if component.get("image") else record.get("tag") == expected_tag
+    if not tagged or not re.fullmatch(r"[0-9a-f]{64}", record.get("chartHash", "")):
         raise ServiceError("invalid-promotion-artifact")
     return record["repository"] + ":" + record["tag"] + "@" + record["digest"]
 

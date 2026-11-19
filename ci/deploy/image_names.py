@@ -4,7 +4,8 @@
 
 The RP version is appVersion of helm/openg2p-farmer-registry/Chart.yaml (the OpenG2P registry platform the images are
 built on) and <version> is that chart's version, so both move with Chart.yaml and nothing else holds them. <build> is the
-Jenkins build number. The pipeline, the chart packaging and the deployment guards all take the names from here.
+Jenkins build number. The pipeline, the chart packaging, the deployment guards and ci/services/coordinator.py (the
+dashboard-ui and dashboard-api images) all take the names from here.
 
 Releases deployed before these names still run images of openg2p/farmer-registry/<image>:<commit12>; a guard that
 reads an installed release accepts those too (legacy_repository).

@@ -23,9 +23,12 @@ def module(name, path):
 coordinator = module("coordinator", "ci/services/coordinator.py")
 cutover = module("connector_cutover", "scripts/operations/connector/connector_cutover.py")
 identity = module("identity_check", "scripts/operations/identity/check.py")
+image_names = module("image_names", "ci/deploy/image_names.py")
+dashboard_rehearsal = module("dashboard_rehearsal", "scripts/operations/dashboard/rehearse.py")
 ECR = "123456789012.dkr.ecr.ap-south-1.amazonaws.com"
 SHA = "a" * 40
 DIGEST = "sha256:" + "b" * 64
+BUILD_TAG = image_names.tag("develop", 300)     # the dashboards' tag (ci/deploy/image_names.py)
 DEV_API_OVERLAY = yaml.safe_load((ROOT / "helm/environments/dev/services/farmer-registry-dashboard-api.yaml").read_text())
 DEV_API_AUTH = DEV_API_OVERLAY["dashboardApi"]["env"]
 
@@ -38,8 +41,8 @@ def component():
 
 
 def record(component):
-    return {"commit": SHA, "repository": ECR + "/" + component.get("imageRepository", "openg2p/farmer-registry/" + component["name"]),
-            "tag": SHA[:12], "digest": DIGEST, "chartHash": "c" * 64, "outcome": "built"}
+    return {"commit": SHA, "repository": ECR + "/" + coordinator.image_repository(component, ""),
+            "tag": BUILD_TAG if component.get("image") else SHA[:12], "digest": DIGEST, "chartHash": "c" * 64, "outcome": "built"}
 
 
 def deployment(name, image="old:v1", replicas=1):
@@ -142,6 +145,38 @@ def test_failed_api_rollout_prevents_dependent_dashboard_rollout(tmp_path):
     assert result["farmer-registry-dashboard"]["reason"] == "dashboard-api-not-deployed"
 
 
+@pytest.mark.parametrize("name,image", [("farmer-registry-dashboard", "dashboard-ui"),
+                                        ("farmer-registry-dashboard-api", "dashboard-api")])
+def test_the_dashboard_images_are_named_by_image_names(name, image):
+    component = next(c for c in coordinator.configuration() if c["name"] == name)
+    assert coordinator.image_repository(component, "") == image_names.repository(image)
+
+
+@pytest.mark.parametrize("image,pinned", [
+    (ECR + "/" + image_names.repository("dashboard-ui") + ":" + BUILD_TAG + "@" + DIGEST, True),
+    (ECR + "/openg2p/farmer-registry/dashboard-ui:" + SHA[:12] + "@" + DIGEST, True),     # built before the eoan names
+    (ECR + "/" + image_names.repository("dashboard-ui") + ":" + BUILD_TAG, False),
+    (ECR + "/" + image_names.repository("dashboard-api") + ":" + BUILD_TAG + "@" + DIGEST, False)])
+def test_the_dashboard_hook_rehearsal_takes_a_pinned_dashboard_ui_image(monkeypatch, image, pinned):
+    def helm(args, check=True):
+        raise RuntimeError("past the image check")
+    monkeypatch.setattr(dashboard_rehearsal, "command", helm)
+    with pytest.raises(RuntimeError if pinned else ValueError):
+        dashboard_rehearsal.rehearse(image, "tools", "chart", "values")
+
+
+@pytest.mark.parametrize("tools,accepted", [("oan-ci/services:" + BUILD_TAG, True),        # develop: IMAGE_TAG of image_names
+                                            ("oan-ci/services:" + SHA[:12], True),          # staging: the commit
+                                            ("oan-ci/services:latest", False), ("other/services:" + SHA[:12], False)])
+def test_the_dashboard_hook_rehearsal_runs_on_the_coordinator_image_of_this_build(monkeypatch, tools, accepted):
+    component = next(c for c in coordinator.configuration() if c.get("chartSource") == "registry")
+    monkeypatch.setenv("COORDINATOR_IMAGE", tools)
+    with pytest.raises(coordinator.ServiceError) as failure:
+        coordinator.dashboard_hook_rehearsal(component, "staging", record(component), "chart", ECR, None)
+    expected = "dashboard-hook-rehearsal-environment-mismatch" if accepted else "dashboard-hook-rehearsal-tools-required"
+    assert str(failure.value) == expected
+
+
 def test_configuration_rejects_other_registry_ownership(tmp_path, component):
     config = tmp_path / "components.yaml"
     config.write_text(yaml.safe_dump({"oanAddons": {"components": [dict(component, namespace="livestock")]}}))
@@ -190,6 +225,21 @@ def test_jenkins_transfers_hidden_chart_files_bound_into_the_build_hash():
         line = next(line for line in (ROOT / path).read_text().splitlines() if "stash name: '" + name + "'" in line)
         assert "helm/**" in line and "useDefaultExcludes: false" in line
         assert "scripts/**" in line and "integrations/**" in line and "test/runtime/**" in line
+
+
+def test_the_coordinator_container_gets_the_jenkins_build_that_tags_the_dashboards(tmp_path):
+    (tmp_path / "bin").mkdir()
+    for name, body in (("docker", 'printf "<%s>\\n" "$@" >> "$CALLS"'), ("stat", "echo 1000")):
+        (tmp_path / "bin" / name).write_text("#!/bin/sh\n" + body + "\n")
+        (tmp_path / "bin" / name).chmod(0o755)
+    (tmp_path / "ci/services").mkdir(parents=True)
+    (tmp_path / "ci/services/run-container.sh").write_text((ROOT / "ci/services/run-container.sh").read_text())
+    environment = {"PATH": str(tmp_path / "bin") + ":/usr/bin:/bin", "CALLS": str(tmp_path / "calls"),
+                   "IMAGE_TAG": "0.0.0-develop.300", "BRANCH_NAME": "develop", "BUILD_NUMBER": "300"}
+    subprocess.run(["bash", "ci/services/run-container.sh", "build", "--environment", "dev"], cwd=tmp_path,
+                   env=environment, check=True)
+    calls = (tmp_path / "calls").read_text().splitlines()
+    assert "<BRANCH_NAME>" in calls and "<BUILD_NUMBER>" in calls
 
 
 def test_staging_components_target_farmer_without_adopting_the_legacy_connector():
@@ -354,7 +404,7 @@ def test_embedded_api_deploy_uses_approved_chart_filters_jobs_and_keeps_registry
             selected = yaml.safe_load(Path(args[args.index("-f") + 1]).read_text())
             assert selected["dashboardApi"]["enabled"] is True
             assert selected["dashboardApi"]["env"] == DEV_API_AUTH
-            assert selected["dashboardApi"]["image"]["repository"] == ECR + "/openg2p/farmer-registry/dashboard-api"
+            assert selected["dashboardApi"]["image"]["repository"] == ECR + "/" + image_names.repository("dashboard-api")
             if args[1] == "upgrade":
                 state["upgraded"] = True
             return yaml.safe_dump_all(after)
@@ -532,6 +582,15 @@ def test_promotion_rejects_tampered_artifact(component, field, value):
     item[field] = value
     with pytest.raises(coordinator.ServiceError):
         coordinator.artifact(component, item, ECR)
+
+
+def test_a_named_image_is_promoted_by_the_tag_of_image_names(component):
+    component["image"] = "dashboard-ui"
+    item = dict(record(component), tag=image_names.tag("develop", 300))
+    assert coordinator.artifact(component, item, ECR) == (ECR + "/" + image_names.repository("dashboard-ui") + ":"
+                                                         + image_names.tag("develop", 300) + "@" + DIGEST)
+    with pytest.raises(coordinator.ServiceError, match="invalid-promotion-artifact"):
+        coordinator.artifact(component, dict(item, tag=SHA[:12]), ECR)
 
 
 def test_promoted_image_contains_exact_digest(component):
@@ -822,6 +881,27 @@ def test_build_records_pushed_digest_and_verifies_it_by_digest(tmp_path, monkeyp
     assert calls[0][:2] == ["docker", "build"]
 
 
+def test_a_named_image_is_tagged_with_the_build_of_image_names(tmp_path, monkeypatch, component):
+    component["image"] = "dashboard-ui"
+    source = tmp_path / "source"
+    (source / component["chart"]).mkdir(parents=True)
+    (source / "Dockerfile").write_text("FROM example:pin\n")
+    (source / component["chart"] / "Chart.yaml").write_text("apiVersion: v2\nname: example\nversion: 1.0.0\n")
+    monkeypatch.setattr(coordinator, "checkout", lambda *a, **kw: SHA)
+    monkeypatch.setenv("BRANCH_NAME", "develop")
+    monkeypatch.setenv("BUILD_NUMBER", "300")
+    def run(args):
+        if args[:2] == ["docker", "push"]:
+            return "tag: digest: " + DIGEST + " size: 100"
+        return DIGEST + "\n" if args[:3] == ["aws", "ecr", "describe-images"] else ""
+    result = coordinator.build(component, "dev", source, ECR, run)
+    assert result["repository"] == ECR + "/" + image_names.repository("dashboard-ui")
+    assert result["tag"] == image_names.tag("develop", 300)
+    monkeypatch.delenv("BUILD_NUMBER")
+    with pytest.raises(coordinator.ServiceError, match="^image-tag-unavailable$"):
+        coordinator.build(component, "dev", source, ECR, run)
+
+
 @pytest.fixture
 def release_tools(tmp_path, monkeypatch, component):
     monkeypatch.setattr(coordinator, "ROOT", tmp_path)
@@ -1012,6 +1092,26 @@ def test_a_missing_role_repository_is_created_like_the_component_repository():
     assert create[create.index("--image-tag-mutability") + 1] == "IMMUTABLE"
     assert create[create.index("--image-scanning-configuration") + 1] == "scanOnPush=true"
     assert create[create.index("--encryption-configuration") + 1] == "encryptionType=AES256"
+
+
+def test_a_missing_named_image_repository_is_created_on_the_first_push(component):
+    component["image"] = "dashboard-ui"
+    calls, pushes = [], []
+    def run(args, **kwargs):
+        calls.append(args)
+        if args[:2] == ["docker", "push"]:
+            pushes.append(args)
+            if len(pushes) == 1:
+                raise coordinator.ServiceError("image-repository-missing")
+            return "tag: digest: " + DIGEST + " size: 100"
+        return DIGEST + "\n" if args[:3] == ["aws", "ecr", "describe-images"] else ""
+    coordinator.build_image(component, "main", {"dockerfile": "Dockerfile", "context": "."}, SHA, Path("/source"), ECR, run,
+                            BUILD_TAG)
+    create = next(args for args in calls if args[:3] == ["aws", "ecr", "create-repository"])
+    assert create[create.index("--repository-name") + 1] == image_names.repository("dashboard-ui")
+    assert create[create.index("--image-scanning-configuration") + 1] == "scanOnPush=true"
+    assert not any(args[:3] == ["aws", "ecr", "describe-repositories"] for args in calls)
+    assert len(pushes) == 2
 
 
 @pytest.mark.parametrize("role,rehearsed", [("api", True), ("ui", False)])

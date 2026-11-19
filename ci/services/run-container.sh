@@ -17,6 +17,7 @@ args=(--rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp/services-home
       -e ECR_REGISTRY -e AWS_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY
       -e AWS_SESSION_TOKEN -e CONNECTOR_BACKUP_DIRECTORY
       -e KUBECONFIG_CREDENTIAL
+      -e BRANCH_NAME -e BUILD_NUMBER  # the dashboard images' tag (ci/deploy/image_names.py)
       -v "$PWD:$PWD" -w "$PWD")
 if [[ "$action" == build ]]; then
   args+=(-v /var/run/docker.sock:/var/run/docker.sock
